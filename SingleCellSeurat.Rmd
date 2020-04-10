@@ -1,0 +1,312 @@
+---
+title: "Single Cell RNA-Seq analysis using Seurat package"
+author: "Valentina Stoma"
+output: md_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(Seurat)
+
+```
+
+## Data 
+
+Source of Single Cell RNA - seq dataset is [here](https://support.10xgenomics.com/single-cell-gene-expression/datasets)
+In this set, I am using 10k PBMCs from a Healthy Donor (v3 chemistry) dataset from Cell Ranger 3.0. 
+
+
+```{r}
+pbmc.data<- Read10X(data.dir = "/Users/valentinastoma/DataSci_practice/SingleCell_RNA_seq/raw_feature_bc_matrix")
+```
+
+```{r}
+pbmc.filtered <- CreateSeuratObject(counts = pbmc.data, project = "pbmc10k", assay = "RNA", min.cells = 3, min.features = 200)
+pbmc.filtered
+
+```
+
+
+## Quality Control 
+
+### Mitochondrial genes 
+
+```{r}
+# calculate the percentage of counts originating from a set of features
+# only using mitochondrial genes for this search, we we want the proportion of mt genes in the sample
+pbmc.filtered[["percent.mt"]] <- PercentageFeatureSet(pbmc.filtered, pattern = "^MT-")
+```
+
+
+```{r}
+# Automatically generate QC data from the CreateSeuratObject 
+head(pbmc.filtered@meta.data, 5)
+```
+
+
+In the example below, we visualize QC metrics, and use these to filter cells.
+
+We filter cells that have unique feature counts over 2,500 or less than 200
+We filter cells that have >5% mitochondrial counts
+
+```{r}
+# Visualize QC metrics as a violin plot
+VlnPlot(pbmc.filtered, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+
+
+
+```{r}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+plot1_filtered <- FeatureScatter(pbmc.filtered, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2_filtered <- FeatureScatter(pbmc.filtered, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1_filtered 
+```
+
+
+```{r}
+plot2_filtered
+```
+
+## Data Subset 
+
+```{r}
+# Subsetting the data based on the quality control performed above 
+pbmc.filtered <- subset(pbmc.filtered, subset = nFeature_RNA > 200 & nFeature_RNA < 5800 & percent.mt < 30)
+```
+
+
+```{r}
+# Normalization through standard log method. Although there are other normalization techniques that can be applied to Single
+# Cell RNA - Seq, 
+pbmc.filtered <- NormalizeData(pbmc.filtered, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+
+```{r}
+pbmc.filtered <- FindVariableFeatures(pbmc.filtered, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10_filtered <- head(VariableFeatures(pbmc.filtered), 10)
+top10_filtered
+
+# plot variable features with and without labels
+plot1_variability <- VariableFeaturePlot(pbmc.filtered)
+plot2_variability <- LabelPoints(plot = plot1_variability, points = top10_filtered, repel = TRUE)
+plot1_variability
+```
+
+```{r}
+# with the top 10 genes labels 
+plot2_variability
+```
+
+## Scaling data for subsequent PCA 
+
+
+```{r}
+#all.genes <- rownames(pbmc.filtered)
+pbmc.filtered_onlyvar <- ScaleData(pbmc.filtered)
+
+```
+
+
+## PCA
+
+```{r}
+pbmc.filtered_onlyvar<- RunPCA(pbmc.filtered_onlyvar, features = VariableFeatures(object = pbmc.filtered_onlyvar))
+```
+
+```{r}
+print(pbmc.filtered_onlyvar[["pca"]], dims = 1:5, nfeatures = 5)
+```
+
+### Gene and Feature visualization of the PCA results 
+
+```{r}
+DimPlot(pbmc.filtered_onlyvar, reduction = "pca")
+```
+
+"In particular DimHeatmap allows for easy exploration of the primary sources of heterogeneity in a dataset, and can be useful when trying to decide which PCs to include for further downstream analyses. Both cells and features are ordered according to their PCA scores. Setting cells to a number plots the ‘extreme’ cells on both ends of the spectrum, which dramatically speeds plotting for large datasets. Though clearly a supervised analysis, we find this to be a valuable tool for exploring correlated feature sets." 
+
+```{r}
+DimHeatmap(pbmc.filtered_onlyvar, dims = 1, cells = 500, balanced = TRUE)
+```
+
+```{r}
+DimHeatmap(pbmc.filtered_onlyvar, dims = 1:8, cells = 500, balanced = TRUE)
+```
+
+```{r}
+VizDimLoadings(pbmc.filtered_onlyvar, dims = 1:2, reduction = "pca")
+```
+
+## Determine the dimensionality of the dataset
+
+To overcome the extensive technical noise in any single feature for scRNA-seq data, Seurat clusters cells based on their PCA scores, with each PC essentially representing a ‘metafeature’ that combines information across a correlated feature set. The top principal components therefore represent a robust compression of the dataset. However, how many componenets should we choose to include? 10? 20? 100?
+
+
+We implemented a resampling test inspired by the JackStraw procedure. We randomly permute a subset of the data (1% by default) and rerun PCA, constructing a ‘null distribution’ of feature scores, and repeat this procedure. We identify ‘significant’ PCs as those who have a strong enrichment of low p-value features.
+
+
+```{r}
+# NOTE: This process can take a long time for big datasets, comment out for expediency. More
+# approximate techniques such as those implemented in ElbowPlot() can be used to reduce
+# computation time
+pbmc.filtered_onlyvar <- JackStraw(pbmc.filtered_onlyvar, num.replicate = 100)
+pbmc.filtered_onlyvar <- ScoreJackStraw(pbmc.filtered_onlyvar, dims = 1:20)
+```
+
+Visualization of the estimates of principle component analysis. 
+This plot demonstrates how much of standard deviation in the dataset is explained by 
+a number of principle components. In case of single cell RNA -seq, it is more safe to 
+stay on the higher side of the PCA that one proceeds with in the analysis in order 
+to not loose significant gene expression analysis. In this dataset, we proceed with 
+10 components. 
+
+ 
+```{r}
+ElbowPlot(pbmc.filtered_onlyvar)
+```
+
+## Clustering 
+First construct a K nearest neighbor graph based on the euclidean distance in PCA space, and refine the edge weights between any two cells based on the shared overlap in their local [neighborhoods (Jaccard similarity)](https://satijalab.org/seurat/v3.1/pbmc3k_tutorial.html).
+Clustering is achieved through modularity optimization techniques such as the [Louvain algorithm](https://www.nature.com/articles/s41598-019-41695-z)  (default) or SLM. 
+
+```{r}
+pbmc.filtered_onlyvar <- FindNeighbors(pbmc.filtered_onlyvar, dims = 1:10)
+pbmc.filtered_onlyvar <- FindClusters(pbmc.filtered_onlyvar, resolution = 0.5)
+```
+Uniform Manifold Approximation and Projection (UMAP) is a recently-published non-linear dimensionality reduction technique.using UMAP avoids overcrowding issues which is encountered in PCA
+
+t-SNE is another methods for  non-linear dimensionality reduction technique but is not used here - as some previous research  has demonstrated better efficiency by UMAP DR
+```{r}
+pbmc.filtered_onlyvar<- RunUMAP(pbmc.filtered_onlyvar, dims = 1:10)
+```
+
+To analyze global transcriptional interrelationships, we used multidimensional scaling to represent the degree of similarity among the cells in
+the data set
+
+
+UMAP on the other hand does preserve global structure and since distances are preserved, it also tends to preserve continuity of cell states.
+Uniform Manifold Approximation and Projection (UMAP) is a recently-published non-linear dimensionality reduction technique.
+```{r}
+# note that you can set `label = TRUE` or use the LabelClusters function to help label
+# individual clusters
+DimPlot(pbmc.filtered_onlyvar, reduction = "umap", label = TRUE)
+```
+
+## Cluster Markers adn Biomarkers 
+
+
+```{r}
+# find all markers of cluster 1
+cluster1.markers <- FindMarkers(pbmc.filtered_onlyvar, ident.1 = 1, min.pct = 0.25)
+head(cluster1.markers, n = 5)
+```
+
+```{r}
+# find all markers distinguishing cluster 5 from clusters 0 and 3
+cluster5.markers <- FindMarkers(pbmc.filtered_onlyvar, ident.1 = 5, ident.2 = c(0, 3), min.pct = 0.25)
+head(cluster5.markers, n = 5)
+```
+
+
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+pbmc.markers_filtered <- FindAllMarkers(pbmc.filtered_onlyvar, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+pbmc.markers_filtered %>% group_by(cluster) %>% top_n(n = 2, wt = avg_logFC)
+```
+
+"roc" : Identifies 'markers' of gene expression using ROC analysis. For each gene, evaluates (using AUC) a classifier built on that gene alone, to classify between two groups of cells. An AUC value of 1 means that expression values for this gene alone can perfectly classify the two groupings (i.e. Each of the cells in cells.1 exhibit a higher level than each of the cells in cells.2). An AUC value of 0 also means there is perfect classification, but in the other direction. A value of 0.5 implies that the gene has no predictive power to classify the two groups. Returns a 'predictive power' (abs(AUC-0.5) * 2) ranked matrix of putative differentially expressed genes.
+
+```{r}
+cluster1.markers <- FindMarkers(pbmc.filtered_onlyvar, ident.1 = 0, logfc.threshold = 0.25, test.use = "roc", only.pos = TRUE)
+```
+
+```{r}
+RidgePlot(pbmc.filtered_onlyvar, features = c("LGALS2", "S100A9" ), ncol  = 3)
+```
+
+
+```{r}
+# you can plot raw counts as well
+VlnPlot(pbmc.filtered_onlyvar, features = c("NKG7", "PF4"), slot = "counts", log = TRUE)
+```
+
+
+```{r}
+# you can plot raw counts as well
+VlnPlot(pbmc.filtered_onlyvar, features = c("LGALS2", "S100A9"), slot = "counts", log = TRUE)
+```
+
+```{r}
+FeaturePlot(pbmc.filtered_onlyvar, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP", 
+    "CD8A"))
+```
+
+Generate an expression heatmap for given cells and features. In this case, we are plotting the top 20 markers (or all markers if less than 20) for each cluster.
+
+```{r}
+top10 <- pbmc.markers_filtered %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+DoHeatmap(pbmc.filtered_onlyvar, features = top10$gene)
+```
+
+```{r}
+new.cluster.ids <- c("B_T_cells", 
+
+"Immune_tumor", 
+
+"Differentiation", 
+
+
+"Immune_macrophages", 
+"Immunoglobulin", 
+
+"Cytokines", 
+
+"cell_mediated_immunity", 
+
+"B_T_cells", 
+
+"Immunoglobulin_A", 
+
+"Cytokines", 
+
+"Immunoglobulin_Gamma", 
+
+"HLA_complex", 
+
+"Platelette", 
+
+"B_cells", 
+
+"Lymphoid and gastro tissue", 
+
+"Metastasis_free_marker", 
+
+"medulloblastoma", 
+
+"PI3K pathway")
+names(new.cluster.ids) <- levels(pbmc.filtered_onlyvar)
+pbmc.filtered_onlyvar <- RenameIdents(pbmc.filtered_onlyvar, new.cluster.ids)
+DimPlot(pbmc.filtered_onlyvar, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+CD79a and CD79b. for b cells 
+```{r}
+VlnPlot(pbmc.filtered_onlyvar, features = c("CD79A", "CD79B"), slot = "counts", log = TRUE)
+```
+
+
